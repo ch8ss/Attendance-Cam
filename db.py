@@ -24,7 +24,7 @@ def init_db():
     cur = conn.cursor()
 
     # One row per enrolled child.
-    # face_encoding is a 128-float numpy array stored as raw bytes.
+    # face_encoding is a 512-float ArcFace embedding stored as raw bytes.
     cur.execute("""
         CREATE TABLE IF NOT EXISTS students (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

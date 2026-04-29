@@ -19,7 +19,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import face_recognition
+from insightface.app import FaceAnalysis
 import pyttsx3
 
 import db
@@ -28,21 +28,21 @@ import db
 AUDIO_DIR = Path(__file__).parent / "audio"
 AUDIO_DIR.mkdir(exist_ok=True)
 
-SAMPLES_TARGET = 5  # how many photos we try to capture per kid
+SAMPLES_TARGET = 5
 
 
 def generate_greeting_audio(name: str, out_path: Path):
     """Generate a 'Good morning, NAME' WAV file using offline TTS."""
     engine = pyttsx3.init()
-    engine.setProperty("rate", 160)  # words per minute
+    engine.setProperty("rate", 160)
     engine.save_to_file(f"Good morning, {name}", str(out_path))
     engine.runAndWait()
 
 
-def capture_face_samples(target_count: int = SAMPLES_TARGET):
+def capture_face_samples(app: FaceAnalysis, target_count: int = SAMPLES_TARGET):
     """
     Open the webcam and let the user capture face samples.
-    Returns a list of 128-D face encodings.
+    Returns a list of 512-D ArcFace embeddings (L2-normalized).
     """
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -59,16 +59,15 @@ def capture_face_samples(target_count: int = SAMPLES_TARGET):
             print("Failed to read from webcam.")
             break
 
-        # face_recognition expects RGB; OpenCV gives BGR.
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        face_locations = face_recognition.face_locations(rgb, model="hog")
+        # InsightFace takes BGR directly.
+        faces = app.get(frame)
 
-        # Draw boxes for visual feedback.
         display = frame.copy()
-        for (top, right, bottom, left) in face_locations:
-            cv2.rectangle(display, (left, top), (right, bottom), (0, 255, 0), 2)
+        for face in faces:
+            x1, y1, x2, y2 = (int(v) for v in face.bbox)
+            cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        status = f"Samples: {len(encodings)}/{target_count}  |  Faces: {len(face_locations)}"
+        status = f"Samples: {len(encodings)}/{target_count}  |  Faces: {len(faces)}"
         cv2.putText(display, status, (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(display, "SPACE = capture, Q = done", (10, 60),
@@ -78,14 +77,13 @@ def capture_face_samples(target_count: int = SAMPLES_TARGET):
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord(" "):
-            if len(face_locations) != 1:
+            valid = [f for f in faces if f.embedding is not None]
+            if len(valid) != 1:
                 print(f"  Skipped: need exactly 1 face in frame, "
-                      f"saw {len(face_locations)}.")
+                      f"saw {len(faces)}.")
                 continue
-            sample_encs = face_recognition.face_encodings(rgb, face_locations)
-            if sample_encs:
-                encodings.append(sample_encs[0])
-                print(f"  Captured sample {len(encodings)}/{target_count}")
+            encodings.append(valid[0].embedding)
+            print(f"  Captured sample {len(encodings)}/{target_count}")
             if len(encodings) >= target_count:
                 break
 
@@ -100,6 +98,11 @@ def capture_face_samples(target_count: int = SAMPLES_TARGET):
 def main():
     db.init_db()
 
+    print("Loading face recognition model (may download ~300 MB on first run)...")
+    app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+    app.prepare(ctx_id=0, det_size=(640, 480))
+    print("Model ready.\n")
+
     print("=== New Student Enrollment ===")
     name = input("Student name: ").strip()
     if not name:
@@ -110,16 +113,16 @@ def main():
         print("Class cannot be empty.")
         return
 
-    encodings = capture_face_samples()
+    encodings = capture_face_samples(app)
     if len(encodings) < 3:
         print(f"\nOnly captured {len(encodings)} samples; need at least 3. "
               f"Aborting.")
         return
 
-    # Average all samples into a single, more robust encoding.
+    # Average all samples and re-normalize so cosine similarity stays valid.
     avg_encoding = np.mean(encodings, axis=0)
+    avg_encoding = avg_encoding / np.linalg.norm(avg_encoding)
 
-    # Make a filesystem-safe filename for the audio file.
     safe_name = "".join(c if c.isalnum() else "_" for c in name).strip("_")
     audio_path = AUDIO_DIR / f"{safe_name}_{int(time.time())}.wav"
 
